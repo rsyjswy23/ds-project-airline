@@ -29,6 +29,15 @@ from pyspark.sql.types import DoubleType
 
 
 def build_spark(master, warehouse_dir, metastore_uri, app_name="load_and_clean"):
+    # If an active SparkSession already exists (e.g., notebook kernel), reuse it.
+    try:
+        _active = SparkSession.getActiveSession()
+        if _active is not None:
+            return _active
+    except Exception:
+        # ignore and continue to create/getOrCreate
+        pass
+
     builder = SparkSession.builder.appName(app_name)
     if master:
         builder = builder.master(master)
@@ -38,8 +47,18 @@ def build_spark(master, warehouse_dir, metastore_uri, app_name="load_and_clean")
         builder = builder.config("spark.sql.warehouse.dir", warehouse_dir)
     if metastore_uri:
         builder = builder.config("spark.hadoop.hive.metastore.uris", metastore_uri)
-    spark = builder.getOrCreate()
-    return spark
+    try:
+        spark = builder.getOrCreate()
+        return spark
+    except Exception:
+        # race: if another context was created concurrently, try to return the active session
+        try:
+            _active = SparkSession.getActiveSession()
+            if _active is not None:
+                return _active
+        except Exception:
+            pass
+        raise
 
 
 def hdfs_path_exists(spark, hdfs_uri):
@@ -99,6 +118,56 @@ def try_load(spark, candidate_tables, candidate_paths, csv_fallback):
         traceback.print_exc()
 
     return None
+
+
+def load_and_clean(master=None, warehouse_dir=None, metastore_uri=None, candidates_tables=None,
+                   candidates_paths=None, csv_fallback=None, show_sample=5, spark=None):
+    """
+    Programmatic loader that returns (spark, clean_df).
+    Parameters default to the same values used by the standalone script.
+    """
+    # sensible defaults if caller didn't provide
+    if master is None:
+        master = "spark://spark-master:7077"
+    if warehouse_dir is None:
+        warehouse_dir = "hdfs://namenode:8020/user/hive/warehouse"
+    if metastore_uri is None:
+        metastore_uri = "thrift://hive-metastore:9083"
+    if candidates_tables is None:
+        candidates_tables = ["flights_2006_cleaned", "flights_2006_staged", "flights_2006"]
+    if candidates_paths is None:
+        candidates_paths = [
+            "hdfs://namenode:8020/data/parquet/flights_2006_cleaned",
+            "hdfs://namenode:8020/data/parquet/flights_2006",
+            "hdfs://namenode:8020/data/parquet/flights_2006_features",
+        ]
+    if csv_fallback is None:
+        csv_fallback = "hdfs://namenode:8020/data/flights/2006.csv"
+
+    # use provided SparkSession if passed (avoids creating a second SparkContext in notebooks)
+    if spark is None:
+        spark = build_spark(master, warehouse_dir, metastore_uri, app_name="load_and_clean")
+
+    df = try_load(spark, candidates_tables, candidates_paths, csv_fallback)
+    if df is None:
+        # Do NOT stop the SparkSession here; raise so caller can decide.
+        raise RuntimeError("No suitable data source found (Hive table, Parquet path, or CSV).")
+
+    # Create clean_df: cast ArrDelay to double and drop null/NaN
+    df_cast = df.withColumn("ArrDelay", F.col("ArrDelay").cast(DoubleType()))
+    count_before = df_cast.count()
+    clean_df = df_cast.filter(F.col("ArrDelay").isNotNull() & (~F.isnan(F.col("ArrDelay"))))
+    count_after = clean_df.count()
+
+    # Optionally show a tiny sample for interactive callers
+    try:
+        pdf = clean_df.limit(show_sample).toPandas()
+        print(pdf)
+    except Exception:
+        clean_df.show(min(show_sample, 10), truncate=False)
+
+    print(f"rows before: {count_before:,} | rows after (clean): {count_after:,} | removed: {count_before - count_after:,}")
+    return spark, clean_df
 
 
 def main(argv=None):
