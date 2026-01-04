@@ -1,17 +1,11 @@
 # ds-project-airline
 This is an end to end data science project using Hadoop(HDFS) / Hive / Spark (PySpark) / Postgres (Hive metastore) / Jupyter / PyTorch to build a machine learning model to predict flight arrival delays using a comprehensive 2006 U.S. flight dataset.
 
----
-
 ## Goal:
 Predict whether a flight will be delayed on arrival (≥15 minutes) based on scheduled and actual flight information.
 
----
-
 ## Dataset:
 Airline On-Time Performance dataset from 2003 to 2008 and airports.csv from Havard Dataverse [Link](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/HG7NV7)
-
----
 
 ## Implementation:
 
